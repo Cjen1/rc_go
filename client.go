@@ -10,7 +10,7 @@ import (
 	"encoding/binary"
 	"sync"
 
-	"client/OpWire"
+	"github.com/Cjen1/rc_go/OpWire"
 	"github.com/golang/protobuf/proto"
 )
 
