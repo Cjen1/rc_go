@@ -4,9 +4,6 @@
 build: client
 
 client: client.go OpWire/message.pb.go
-	#go get github.com/pebbe/zmq4
-	#go get github.com/golang/protobuf/proto
-	#go get go.etcd.io/etcd/clientv3
 	/usr/lib/go-1.11/bin/go build -o ./client client.go
 
 OpWire/message.pb.go: ../../../../src/utils/message.proto

@@ -1,4 +1,4 @@
-package client
+package rc_go
 
 import (
 	"fmt"
@@ -162,7 +162,7 @@ func consume_ignore(res_ch chan *OpWire.Response) {
 	for range res_ch {}
 }
 
-func run(client_gen func() (Client, error), clientid uint32, result_pipe string) {
+func Run(client_gen func() (Client, error), clientid uint32, result_pipe string) {
 	log.Print("Client: Starting run")
 	log.Printf("Client: creating file")
 	log.Print(result_pipe)
