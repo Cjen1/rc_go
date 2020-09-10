@@ -24,7 +24,7 @@ type Client interface {
 	Close ()
 }
 
-func put(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_Put, clientid uint32, start float64) {
+func put(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_Put, clientid uint32, expected_start float64) {
 	st := unix_seconds(time.Now())
 	var err error
 	if true {
@@ -41,10 +41,10 @@ func put(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_
 	}
 
 	resp := &OpWire.Response{
-		ResponseTime: end - start,
+		ResponseTime: end - expected_start,
 		Err:          err_msg,
 		ClientStart:  st,
-		QueueStart:   start,
+		QueueStart:   expected_start,
 		End:          end,
 		Clientid:     clientid,
 		Optype:       "Write",
@@ -53,7 +53,7 @@ func put(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_
 	res_ch <- resp
 }
 
-func get(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_Get, clientid uint32, start float64) {
+func get(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_Get, clientid uint32, expected_start float64) {
 	st := unix_seconds(time.Now())
 	_, err := cli.Get(string(op.Get.Key))
 	end := unix_seconds(time.Now())
@@ -64,10 +64,10 @@ func get(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_
 	}
 
 	resp := &OpWire.Response{
-		ResponseTime: end - start,
+		ResponseTime: end - expected_start,
 		Err:          err_msg,
 		ClientStart:  st,
-		QueueStart:   start,
+		QueueStart:   expected_start,
 		End:          end,
 		Clientid:     clientid,
 		Optype:       "Read",
@@ -83,12 +83,12 @@ func check(e error) {
 }
 
 func perform(op OpWire.Request_Operation, res_ch chan *OpWire.Response, cli Client, clientid uint32, start_time time.Time) {
-	start := op.Start + unix_seconds(start_time)
+	expected_start := op.Start + unix_seconds(start_time)
 	switch op_t := op.OpType.(type) {
 	case *OpWire.Request_Operation_Put:
-		put(res_ch, cli, op_t, clientid, start)
+		put(res_ch, cli, op_t, clientid, expected_start)
 	case *OpWire.Request_Operation_Get:
-		get(res_ch, cli, op_t, clientid, start)
+		get(res_ch, cli, op_t, clientid, expected_start)
 	default:
 		resp := &OpWire.Response{
 			ResponseTime: -1,
@@ -230,15 +230,18 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string)
 	go result_loop(res_ch, out_writer, done)
 
 	//Dispatch concurrent clients
+	var start_time *time.Time
+	wait_bar := make(chan struct{})
 	var wg_perform sync.WaitGroup
 	for i, ch := range conns {
 		wg_perform.Add(1)
-		go func(cli Client, ch chan OpWire.Request_Operation) {
+		go func(cli Client, ch chan OpWire.Request_Operation, t *time.Time) {
 			defer wg_perform.Done()
+			<-wait_bar
 			for op := range ch {
-				perform(op, res_ch, cli, clientid, time.Now())
+				perform(op, res_ch, cli, clientid, *t)
 			}
-		} (clients[i%nclients], ch)
+		} (clients[i%nclients], ch, start_time)
 	}
 
 
@@ -260,7 +263,8 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string)
 	}
 
 	log.Print("Starting to perform ops")
-	start_time := time.Now()
+	*start_time = time.Now()
+	close(wait_bar)
 	for i, op := range ops {
 		end_time := start_time.Add(time.Duration(op.Start * float64(time.Second)))
 		t := time.Now()
