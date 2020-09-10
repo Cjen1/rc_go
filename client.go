@@ -82,8 +82,8 @@ func check(e error) {
 	}
 }
 
-func perform(op OpWire.Request_Operation, res_ch chan *OpWire.Response, cli Client, clientid uint32, start_time time.Time) {
-	expected_start := op.Start + unix_seconds(start_time)
+func perform(op OpWire.Request_Operation, res_ch chan *OpWire.Response, cli Client, clientid uint32, start_time float64) {
+	expected_start := op.Start + start_time
 	switch op_t := op.OpType.(type) {
 	case *OpWire.Request_Operation_Put:
 		put(res_ch, cli, op_t, clientid, expected_start)
@@ -128,7 +128,7 @@ func marshall_response(resp *OpWire.Response) []byte {
 func send(writer *os.File, msg []byte){
 	var size int32
 	size = int32(len(msg))
-	log.Printf("send size = %l", size)
+	log.Printf("send size = %d", size)
 	size_part := make([]byte, 4)
 	// uint32 doesn't change sign bit, just how value is interpreted
 	binary.LittleEndian.PutUint32(size_part, uint32(size))
@@ -191,7 +191,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string)
 		case *OpWire.Request_Op:
 			if op.GetOp().Prereq {
 				log.Print("Performing prereq")
-				perform(*op.GetOp(), bh_ch, cli, clientid, time.Now())
+				perform(*op.GetOp(), bh_ch, cli, clientid, unix_seconds(time.Now()))
 			} else {
 				ops = append(ops, op.GetOp())
 			}
@@ -238,8 +238,9 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string)
 		go func(cli Client, ch chan OpWire.Request_Operation, t *time.Time) {
 			defer wg_perform.Done()
 			<-wait_bar
+			start_time := *t
 			for op := range ch {
-				perform(op, res_ch, cli, clientid, *t)
+				perform(op, res_ch, cli, clientid, unix_seconds(start_time))
 			}
 		} (clients[i%nclients], ch, start_time)
 	}
