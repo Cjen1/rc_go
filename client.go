@@ -230,7 +230,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string)
 	go result_loop(res_ch, out_writer, done)
 
 	//Dispatch concurrent clients
-	var start_time *time.Time
+	start_time := new(time.Time)
 	wait_bar := make(chan struct{})
 	var wg_perform sync.WaitGroup
 	for i, ch := range conns {
