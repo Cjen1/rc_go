@@ -273,6 +273,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string)
 		select {
 		case conns[i % nchannels] <- *op:
 		default:
+			log.Printf("Skipping op, channel is blocked")
 		}
 	}
 	log.Print("Finished sending ops")
