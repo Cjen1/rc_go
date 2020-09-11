@@ -270,7 +270,10 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string)
 		end_time := start_time.Add(time.Duration(op.Start * float64(time.Second)))
 		t := time.Now()
 		for ; t.Before(end_time); t = time.Now() {}
-		conns[i % nchannels] <- *op
+		select {
+		case conns[i % nchannels] <- *op:
+		default:
+		}
 	}
 	log.Print("Finished sending ops")
 
