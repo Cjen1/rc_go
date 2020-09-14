@@ -162,7 +162,7 @@ func consume_ignore(res_ch chan *OpWire.Response) {
 	for range res_ch {}
 }
 
-func Run(client_gen func() (Client, error), clientid uint32, result_pipe string) {
+func Run(client_gen func() (Client, error), clientid uint32, result_pipe string, drop_overloaded bool) {
 	log.Print("Client: Starting run")
 	log.Printf("Client: creating file")
 	log.Print(result_pipe)
@@ -270,10 +270,14 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string)
 		end_time := start_time.Add(time.Duration(op.Start * float64(time.Second)))
 		t := time.Now()
 		for ; t.Before(end_time); t = time.Now() {}
-		select {
-		case conns[i % nchannels] <- *op:
-		default:
-			log.Printf("Skipping op, channel is blocked")
+		if drop_overloaded {
+			select {
+			case conns[i % nchannels] <- *op:
+			default:
+				log.Printf("Skipping op, channel is blocked")
+			}
+		} else {
+			conns[i % nchannels] <- *op
 		}
 	}
 	log.Print("Finished sending ops")
