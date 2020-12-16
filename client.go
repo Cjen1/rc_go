@@ -162,7 +162,7 @@ func consume_ignore(res_ch chan *OpWire.Response) {
 	for range res_ch {}
 }
 
-func Run(client_gen func() (Client, error), clientid uint32, result_pipe string, drop_overloaded bool) {
+func Run(client_gen func() (Client, error), clientid uint32, result_pipe string, drop_overloaded bool, new_client_per_request bool) {
 	log.Print("Client: Starting run")
 	log.Printf("Client: creating file")
 	log.Print(result_pipe)
@@ -208,15 +208,6 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	//Phase 2: Readying
 	log.Print("Phase 2: Readying")
 
-	//Create clients
-	nclients := 100
-	clients := make([]Client, nclients)
-	for i := 0; i < nclients; i++ {
-		cli, err := client_gen()
-		check(err)
-		clients[i] = cli
-	}
-
 	//Create client channels
 	nchannels := 1000
 	conns := make([]chan OpWire.Request_Operation, nchannels)
@@ -229,20 +220,53 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	done := make(chan bool)
 	go result_loop(res_ch, out_writer, done)
 
-	//Dispatch concurrent clients
 	start_time := new(time.Time)
 	wait_bar := make(chan struct{})
 	var wg_perform sync.WaitGroup
-	for i, ch := range conns {
-		wg_perform.Add(1)
-		go func(cli Client, ch chan OpWire.Request_Operation, t *time.Time) {
-			defer wg_perform.Done()
-			<-wait_bar
-			start_time := *t
-			for op := range ch {
-				perform(op, res_ch, cli, clientid, unix_seconds(start_time))
+	closeClients := func () {}
+	if !new_client_per_request {
+		//Create clients
+		nclients := 100
+		clients := make([]Client, nclients)
+		for i := 0; i < nclients; i++ {
+			cli, err := client_gen()
+			check(err)
+			clients[i] = cli
+		}
+
+		//Dispatch concurrent clients
+		for i, ch := range conns {
+			wg_perform.Add(1)
+			go func(cli Client, ch chan OpWire.Request_Operation, t *time.Time) {
+				defer wg_perform.Done()
+				<-wait_bar
+				start_time := *t
+				for op := range ch {
+					perform(op, res_ch, cli, clientid, unix_seconds(start_time))
+				}
+			} (clients[i%nclients], ch, start_time)
+		}
+		closeClients = func () {
+			for _, cli := range clients {
+				cli.Close()
 			}
-		} (clients[i%nclients], ch, start_time)
+		}
+	} else {
+		//Dispatch concurrent clients
+		for _, ch := range conns {
+			wg_perform.Add(1)
+			go func(ch chan OpWire.Request_Operation, t *time.Time) {
+				defer wg_perform.Done()
+				<-wait_bar
+				start_time := *t
+				for op := range ch {
+					cli, err := client_gen()
+					check(err)
+					perform(op, res_ch, cli, clientid, unix_seconds(start_time))
+					cli.Close()
+				}
+			} (ch, start_time)
+		}
 	}
 
 
@@ -294,7 +318,5 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	//Wait for results to be returned to generator
 	<-done
 
-	for _, cli := range clients {
-		cli.Close()
-	}
+	closeClients()
 }
