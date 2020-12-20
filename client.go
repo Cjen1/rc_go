@@ -225,6 +225,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	var wg_perform sync.WaitGroup
 	closeClients := func () {}
 	if !new_client_per_request {
+		log.Print("Using pooled clients")
 		//Create clients
 		nclients := 100
 		clients := make([]Client, nclients)
@@ -252,6 +253,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 			}
 		}
 	} else {
+		log.Print("One client per request")
 		//Dispatch concurrent clients
 		for _, ch := range conns {
 			wg_perform.Add(1)
