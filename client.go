@@ -34,10 +34,7 @@ func put(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_
 
 	err_msg := "None"
 	if err != nil {
-		err = cli.Put(string(op.Put.Key), string(op.Put.Value))
-		if err != nil {
-			err_msg = "ERROR WAS FOUND: " + err.Error()
-		}
+		err_msg = "ERROR WAS FOUND: " + err.Error()
 	}
 
 	resp := &OpWire.Response{
