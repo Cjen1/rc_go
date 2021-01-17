@@ -159,7 +159,7 @@ func consume_ignore(res_ch chan *OpWire.Response) {
 	for range res_ch {}
 }
 
-func Run(client_gen func() (Client, error), clientid uint32, result_pipe string, drop_overloaded bool, new_client_per_request bool, number_threads int) {
+func Run(client_gen func() (Client, error), clientid uint32, result_pipe string, drop_overloaded bool, new_client_per_request bool, number_threads int, number_clients int) {
 	log.Print("Client: Starting run")
 	log.Printf("Client: creating file")
 	log.Print(result_pipe)
@@ -224,7 +224,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	if !new_client_per_request {
 		log.Print("Using pooled clients")
 		//Create clients
-		nclients := 100
+		nclients := number_clients
 		clients := make([]Client, nclients)
 		for i := 0; i < nclients; i++ {
 			cli, err := client_gen()
