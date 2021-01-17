@@ -240,7 +240,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 				<-wait_bar
 				start_time := *t
 				for op := range ch {
-					perform(op, res_ch, cli, clientid, unix_seconds(start_time))
+					perform(op, res_ch, cli, (i%nclients), unix_seconds(start_time))
 				}
 			} (clients[i%nclients], ch, start_time)
 		}
