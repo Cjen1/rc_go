@@ -24,7 +24,7 @@ type Client interface {
 	Close ()
 }
 
-func put(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_Put, clientid uint32, expected_start float64) {
+func put(cli Client, op *OpWire.Request_Operation_Put, clientid uint32, expected_start float64) *OpWire.Response{
 	st := unix_seconds(time.Now())
 	var err error
 	if true {
@@ -47,10 +47,10 @@ func put(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_
 		Optype:       "Write",
 	}
 
-	res_ch <- resp
+	return resp
 }
 
-func get(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_Get, clientid uint32, expected_start float64) {
+func get(cli Client, op *OpWire.Request_Operation_Get, clientid uint32, expected_start float64) *OpWire.Response{
 	st := unix_seconds(time.Now())
 	_, err := cli.Get(string(op.Get.Key))
 	end := unix_seconds(time.Now())
@@ -70,7 +70,7 @@ func get(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_
 		Optype:       "Read",
 	}
 
-	res_ch <- resp
+	return resp
 }
 
 func check(e error) {
@@ -79,13 +79,13 @@ func check(e error) {
 	}
 }
 
-func perform(op OpWire.Request_Operation, res_ch chan *OpWire.Response, cli Client, clientid uint32, start_time float64) {
+func perform(op OpWire.Request_Operation, cli Client, clientid uint32, start_time float64) *OpWire.Response{
 	expected_start := op.Start + start_time
 	switch op_t := op.OpType.(type) {
 	case *OpWire.Request_Operation_Put:
-		put(res_ch, cli, op_t, clientid, expected_start)
+		return put(cli, op_t, clientid, expected_start)
 	case *OpWire.Request_Operation_Get:
-		get(res_ch, cli, op_t, clientid, expected_start)
+		return get(cli, op_t, clientid, expected_start)
 	default:
 		resp := &OpWire.Response{
 			ResponseTime: -1,
@@ -93,7 +93,7 @@ func perform(op OpWire.Request_Operation, res_ch chan *OpWire.Response, cli Clie
 			Clientid:     clientid,
 			Optype:       "Error",
 		}
-		res_ch <- resp
+		return resp
 	}
 }
 
@@ -178,8 +178,6 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	log.Print("Phase 1: preload")
 	var ops []*OpWire.Request_Operation
 	got_finalise := false
-	bh_ch := make(chan *OpWire.Response)
-	go consume_ignore(bh_ch)
 	for !got_finalise {
 		op := recv(reader)
 		log.Print(op)
@@ -188,7 +186,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 		case *OpWire.Request_Op:
 			if op.GetOp().Prereq {
 				log.Print("Performing prereq")
-				perform(*op.GetOp(), bh_ch, cli, clientid, unix_seconds(time.Now()))
+				perform(*op.GetOp(), cli, clientid, unix_seconds(time.Now()))
 			} else {
 				ops = append(ops, op.GetOp())
 			}
@@ -200,15 +198,29 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 			log.Fatal("Quitting due to unrecognised message")
 		}
 	}
-	close(bh_ch)
 
 	//Phase 2: Readying
 	log.Print("Phase 2: Readying")
 
 	//Dispatch results loop
-	res_ch := make(chan *OpWire.Response, 50000)
+	final_res_ch := make(chan *OpWire.Response)
 	done := make(chan bool)
-	go result_loop(res_ch, out_writer, done)
+	go result_loop(final_res_ch, out_writer, done)
+
+	//Use a messenger to allow for gracefully shutting the result channel with all current values
+	res_ch := make(chan *OpWire.Response, 50000)
+	messenger_close := make(chan struct{})
+	go func(messenger_close chan struct{}) {
+		for {
+			select{
+			case <- messenger_close:
+				close(final_res_ch)
+				return
+			case result := <-res_ch:
+				final_res_ch <- result
+			}
+		}
+	} (messenger_close)
 
 	//signal ready
 	send(out_writer, []byte(""))
@@ -228,6 +240,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	}
 
 	var wg_perform sync.WaitGroup
+	stopCh := make(chan struct{})
 	log.Print("Starting to perform ops")
 	start_time := time.Now()
 	for _, op := range ops {
@@ -244,16 +257,31 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 				defer cli.Close()
 				func_cli = &cli
 			}
-			perform(op, res_ch, *func_cli, clientid, unix_seconds(start_time))
+			resp := perform(op, *func_cli, clientid, unix_seconds(start_time))
+			select {
+			case <- stopCh:
+				return
+			case res_ch <- resp:
+			}
 		} (*op)
 	}
 	log.Print("Finished sending ops")
 
 	//Wait to complete ops
-	wg_perform.Wait()
+	wg_done := make(chan struct{})
+	go func() {
+		wg_perform.Wait()
+		close(wg_done)
+	} ()
+
+	select {
+	case <- done:
+	case <- time.After(5 * time.Minute):
+	}
 
 	//Signal end of results 
-	close(res_ch)
+	close(messenger_close)
+
 	//Wait for results to be returned to generator
 	<-done
 }
