@@ -155,6 +155,7 @@ func result_loop(res_ch chan *OpWire.Response, out *os.File, done chan struct{})
 		results = append(results, res)
 	}
 
+	log.Print("Got all results, writing to load generator")
 	for _, res := range results {
 		payload := marshall_response(res)
 		send(out, payload)
@@ -171,19 +172,19 @@ func waitGroupChannel(wg *sync.WaitGroup) (<-chan struct{}) {
 	return complete
 }
 
-func make_messenger(input chan *OpWire.Response, output chan *OpWire.Response) chan struct{}{
+func make_messenger(input <-chan *OpWire.Response, output chan *OpWire.Response) chan struct{}{
 	close_this := make(chan struct{})
-	go func(messenger_close chan struct {}, output chan *OpWire.Response, res_ch chan *OpWire.Response) {
+	go func(messenger_close chan struct {}, input <-chan *OpWire.Response, output chan *OpWire.Response) {
 		for {
 			select {
 			case <- close_this:
 				close(output)
 				return
-			case result := <-res_ch:
+			case result := <-input:
 				output <- result
 			}
 		}
-	}(close_this, output, input)
+	}(close_this, input, output)
 	return close_this
 }
 
@@ -235,7 +236,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	results_complete := make(chan struct{})
 	go result_loop(final_res_ch, out_writer, results_complete)
 	res_ch := make(chan *OpWire.Response, 50000)
-	messenger_complete := make_messenger(final_res_ch, res_ch)
+	messenger_complete := make_messenger(res_ch, final_res_ch)
 
 	//signal ready
 	send(out_writer, []byte(""))
