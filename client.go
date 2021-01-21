@@ -79,13 +79,22 @@ func check(e error) {
 	}
 }
 
-func perform(op OpWire.Request_Operation, cli Client, clientid uint32, start_time float64) *OpWire.Response{
+func perform(op OpWire.Request_Operation, cli Client, clientid uint32, start_time float64, new_client_per_request bool, client_gen func () (Client, error)) *OpWire.Response{
+	//Create a new client if desired
+	func_cli := &cli
+	if new_client_per_request {
+		cli, err := client_gen()
+		check(err)
+		defer cli.Close()
+		func_cli = &cli
+	}
+
 	expected_start := op.Start + start_time
 	switch op_t := op.OpType.(type) {
 	case *OpWire.Request_Operation_Put:
-		return put(cli, op_t, clientid, expected_start)
+		return put(*func_cli, op_t, clientid, expected_start)
 	case *OpWire.Request_Operation_Get:
-		return get(cli, op_t, clientid, expected_start)
+		return get(*func_cli, op_t, clientid, expected_start)
 	default:
 		resp := &OpWire.Response{
 			ResponseTime: -1,
@@ -112,7 +121,6 @@ func recv(reader *bufio.Reader) *OpWire.Request{
 	if err := proto.Unmarshal([]byte(payload), op); err != nil {
 		log.Fatal("Failed to parse incomming operation")
 	}
-	log.Printf("received op size = %d\n", size)
 	return op
 }
 
@@ -125,7 +133,6 @@ func marshall_response(resp *OpWire.Response) []byte {
 func send(writer *os.File, msg []byte){
 	var size int32
 	size = int32(len(msg))
-	log.Printf("send size = %d", size)
 	size_part := make([]byte, 4)
 	// uint32 doesn't change sign bit, just how value is interpreted
 	binary.LittleEndian.PutUint32(size_part, uint32(size))
@@ -149,7 +156,6 @@ func result_loop(res_ch chan *OpWire.Response, out *os.File, done chan bool) {
 
 	for _, res := range results {
 		payload := marshall_response(res)
-		log.Print("Sending response")
 		send(out, payload)
 	}
 	done <- true
@@ -186,7 +192,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 		case *OpWire.Request_Op:
 			if op.GetOp().Prereq {
 				log.Print("Performing prereq")
-				perform(*op.GetOp(), cli, clientid, unix_seconds(time.Now()))
+				perform(*op.GetOp(), cli, clientid, unix_seconds(time.Now()), false, client_gen)
 			} else {
 				ops = append(ops, op.GetOp())
 			}
@@ -241,29 +247,33 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 
 	var wg_perform sync.WaitGroup
 	stopCh := make(chan struct{})
+	op_ch := make(chan *OpWire.Request_Operation)
 	log.Print("Starting to perform ops")
 	start_time := time.Now()
 	for _, op := range ops {
 		end_time := start_time.Add(time.Duration(op.Start * float64(time.Second)))
 		t := time.Now()
-		for ; t.Before(end_time); t = time.Now() {}
-		go func(op OpWire.Request_Operation) {
+		time.Sleep(end_time.Sub(t))
+
+		select {
+		case op_ch <- op:
+			continue
+		default:
 			wg_perform.Add(1)
-			defer wg_perform.Done()
-			func_cli := &cli
-			if new_client_per_request {
-				cli, err := client_gen()
-				check(err)
-				defer cli.Close()
-				func_cli = &cli
-			}
-			resp := perform(op, *func_cli, clientid, unix_seconds(start_time))
-			select {
-			case <- stopCh:
-				return
-			case res_ch <- resp:
-			}
-		} (*op)
+			//If can't start op currently create a new worker to do so
+			go func(op_ch <-chan *OpWire.Request_Operation, wg *sync.WaitGroup) {
+				defer wg.Done()
+				for op := range op_ch {
+					resp := perform(*op, cli, clientid, unix_seconds(start_time), new_client_per_request, client_gen)
+					select {
+					case <- stopCh:
+						continue
+					case res_ch <- resp:
+					}
+				}
+			} (op_ch, &wg_perform)
+			op_ch <- op
+		}
 	}
 	log.Print("Finished sending ops")
 
