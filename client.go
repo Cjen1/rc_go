@@ -283,11 +283,15 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	log.Print("Phase 4: Collate")
 	close(op_ch)
 
+	log.Print("Waiting for ops to finish")
 	wg_perform.Wait()
 
+	log.Print("Closing result pipe")
 	//Signal end of results 
 	close(messenger_complete)
 
+	log.Print("Waiting for results to be sent")
 	//Wait for results to be returned to generator
 	<-results_complete
+	log.Print("Results sent, exiting good night")
 }
