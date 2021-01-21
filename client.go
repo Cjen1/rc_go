@@ -81,20 +81,21 @@ func check(e error) {
 
 func perform(op OpWire.Request_Operation, cli Client, clientid uint32, start_time float64, new_client_per_request bool, client_gen func () (Client, error)) *OpWire.Response{
 	//Create a new client if desired
-	func_cli := &cli
-	if new_client_per_request {
-		cli, err := client_gen()
-		check(err)
-		defer cli.Close()
-		func_cli = &cli
-	}
+	//func_cli := &cli
+	//if new_client_per_request {
+	//	cli, err := client_gen()
+	//	check(err)
+	//	defer cli.Close()
+	//	func_cli = &cli
+	//}
 
-	expected_start := op.Start + start_time
-	switch op_t := op.OpType.(type) {
-	case *OpWire.Request_Operation_Put:
-		return put(*func_cli, op_t, clientid, expected_start)
-	case *OpWire.Request_Operation_Get:
-		return get(*func_cli, op_t, clientid, expected_start)
+	//expected_start := op.Start + start_time
+	//switch op_t := op.OpType.(type) {
+	//case *OpWire.Request_Operation_Put:
+	//	return put(*func_cli, op_t, clientid, expected_start)
+	//case *OpWire.Request_Operation_Get:
+	//	return get(*func_cli, op_t, clientid, expected_start)
+	switch {
 	default:
 		resp := &OpWire.Response{
 			ResponseTime: -1,
