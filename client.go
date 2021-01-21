@@ -276,6 +276,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 		}
 	}
 	log.Print("Finished sending ops")
+	close(op_ch)
 
 	//Wait to complete ops
 	wg_done := make(chan struct{})
