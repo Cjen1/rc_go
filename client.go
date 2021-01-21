@@ -147,7 +147,7 @@ func init() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 }
 
-func result_loop(res_ch chan *OpWire.Response, out *os.File, done chan bool) {
+func result_loop(res_ch chan *OpWire.Response, out *os.File, done chan struct{}) {
 	var results []*OpWire.Response
 	log.Print("Starting result loop")
 	for res := range res_ch {
@@ -158,11 +158,32 @@ func result_loop(res_ch chan *OpWire.Response, out *os.File, done chan bool) {
 		payload := marshall_response(res)
 		send(out, payload)
 	}
-	done <- true
+	close(done)
 }
 
-func consume_ignore(res_ch chan *OpWire.Response) {
-	for range res_ch {}
+func waitGroupChannel(wg *sync.WaitGroup) (<-chan struct{}) {
+	complete := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(complete)
+	} ()
+	return complete
+}
+
+func make_messenger(input chan *OpWire.Response, output chan *OpWire.Response) chan struct{}{
+	close_this := make(chan struct{})
+	go func(messenger_close chan struct {}, output chan *OpWire.Response, res_ch chan *OpWire.Response) {
+		for {
+			select {
+			case <- close_this:
+				close(output)
+				return
+			case result := <-res_ch:
+				output <- result
+			}
+		}
+	}(close_this, output, input)
+	return close_this
 }
 
 func Run(client_gen func() (Client, error), clientid uint32, result_pipe string, new_client_per_request bool) {
@@ -210,23 +231,10 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 
 	//Dispatch results loop
 	final_res_ch := make(chan *OpWire.Response)
-	done := make(chan bool)
-	go result_loop(final_res_ch, out_writer, done)
-
-	//Use a messenger to allow for gracefully shutting the result channel with all current values
+	results_complete := make(chan struct{})
+	go result_loop(final_res_ch, out_writer, results_complete)
 	res_ch := make(chan *OpWire.Response, 50000)
-	messenger_close := make(chan struct{})
-	go func(messenger_close chan struct{}) {
-		for {
-			select{
-			case <- messenger_close:
-				close(final_res_ch)
-				return
-			case result := <-res_ch:
-				final_res_ch <- result
-			}
-		}
-	} (messenger_close)
+	messenger_complete := make_messenger(final_res_ch, res_ch)
 
 	//signal ready
 	send(out_writer, []byte(""))
@@ -276,23 +284,18 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 		}
 	}
 	log.Print("Finished sending ops")
+	log.Print("Phase 4: Collate")
+	close(stopCh)
 	close(op_ch)
 
-	//Wait to complete ops
-	wg_done := make(chan struct{})
-	go func() {
-		wg_perform.Wait()
-		close(wg_done)
-	} ()
-
 	select {
-	case <- done:
-	case <- time.After(5 * time.Minute):
+	case <- waitGroupChannel(&wg_perform):
+	case <- time.After(30 * time.Second):
 	}
 
 	//Signal end of results 
-	close(messenger_close)
+	close(messenger_complete)
 
 	//Wait for results to be returned to generator
-	<-done
+	<-results_complete
 }
