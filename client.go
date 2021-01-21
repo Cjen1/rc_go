@@ -255,7 +255,6 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	}
 
 	var wg_perform sync.WaitGroup
-	stopCh := make(chan struct{})
 	op_ch := make(chan *OpWire.Request_Operation)
 	log.Print("Starting to perform ops")
 	start_time := time.Now()
@@ -273,11 +272,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 			go func(op_ch <-chan *OpWire.Request_Operation, wg *sync.WaitGroup) {
 				for op := range op_ch {
 					resp := perform(*op, cli, clientid, unix_seconds(start_time), new_client_per_request, client_gen)
-					select {
-					case <- stopCh:
-						break
-					case res_ch <- resp:
-					}
+					res_ch <- resp
 				}
 				wg.Done()
 			} (op_ch, &wg_perform)
@@ -286,14 +281,9 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	}
 	log.Print("Finished sending ops")
 	log.Print("Phase 4: Collate")
-	close(stopCh)
 	close(op_ch)
 
-	log.Print("Waiting for waitgroup to complete")
-	select {
-	case <- waitGroupChannel(&wg_perform):
-	case <- time.After(30 * time.Second):
-	}
+	wg_perform.Wait()
 
 	//Signal end of results 
 	close(messenger_complete)
