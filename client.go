@@ -271,15 +271,15 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 			wg_perform.Add(1)
 			//If can't start op currently create a new worker to do so
 			go func(op_ch <-chan *OpWire.Request_Operation, wg *sync.WaitGroup) {
-				defer wg.Done()
 				for op := range op_ch {
 					resp := perform(*op, cli, clientid, unix_seconds(start_time), new_client_per_request, client_gen)
 					select {
 					case <- stopCh:
-						continue
+						break
 					case res_ch <- resp:
 					}
 				}
+				wg.Done()
 			} (op_ch, &wg_perform)
 			op_ch <- op
 		}
@@ -289,6 +289,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	close(stopCh)
 	close(op_ch)
 
+	log.Print("Waiting for waitgroup to complete")
 	select {
 	case <- waitGroupChannel(&wg_perform):
 	case <- time.After(30 * time.Second):
