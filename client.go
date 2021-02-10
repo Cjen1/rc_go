@@ -19,17 +19,14 @@ func unix_seconds(t time.Time) float64 {
 }
 
 type Client interface {
-	Put(string, string) error
-	Get(string) (string, error)
+	Put(string, string) (string, error)
+	Get(string) (string, string, error)
 	Close ()
 }
 
 func put(cli Client, op *OpWire.Request_Operation_Put, clientid uint32, expected_start float64) *OpWire.Response{
 	st := unix_seconds(time.Now())
-	var err error
-	if true {
-		err = cli.Put(string(op.Put.Key), string(op.Put.Value))
-	}
+	target, err := cli.Put(string(op.Put.Key), string(op.Put.Value))
 	end := unix_seconds(time.Now())
 
 	err_msg := "None"
@@ -45,6 +42,7 @@ func put(cli Client, op *OpWire.Request_Operation_Put, clientid uint32, expected
 		End:          end,
 		Clientid:     clientid,
 		Optype:       "Write",
+		Target:       target,
 	}
 
 	return resp
@@ -52,7 +50,7 @@ func put(cli Client, op *OpWire.Request_Operation_Put, clientid uint32, expected
 
 func get(cli Client, op *OpWire.Request_Operation_Get, clientid uint32, expected_start float64) *OpWire.Response{
 	st := unix_seconds(time.Now())
-	_, err := cli.Get(string(op.Get.Key))
+	target, _, err := cli.Get(string(op.Get.Key))
 	end := unix_seconds(time.Now())
 
 	err_msg := "None"
@@ -68,6 +66,7 @@ func get(cli Client, op *OpWire.Request_Operation_Get, clientid uint32, expected
 		End:          end,
 		Clientid:     clientid,
 		Optype:       "Read",
+		Target:       target,
 	}
 
 	return resp
