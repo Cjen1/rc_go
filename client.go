@@ -19,17 +19,14 @@ func unix_seconds(t time.Time) float64 {
 }
 
 type Client interface {
-	Put(string, string) error
-	Get(string) (string, error)
+	Put(string, string) (string, error)
+	Get(string) (string, string, error)
 	Close ()
 }
 
-func put(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_Put, clientid uint32, expected_start float64) {
+func put(cli Client, op *OpWire.Request_Operation_Put, clientid uint32, expected_start float64) *OpWire.Response{
 	st := unix_seconds(time.Now())
-	var err error
-	if true {
-		err = cli.Put(string(op.Put.Key), string(op.Put.Value))
-	}
+	target, err := cli.Put(string(op.Put.Key), string(op.Put.Value))
 	end := unix_seconds(time.Now())
 
 	err_msg := "None"
@@ -45,14 +42,15 @@ func put(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_
 		End:          end,
 		Clientid:     clientid,
 		Optype:       "Write",
+		Target:       target,
 	}
 
-	res_ch <- resp
+	return resp
 }
 
-func get(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_Get, clientid uint32, expected_start float64) {
+func get(cli Client, op *OpWire.Request_Operation_Get, clientid uint32, expected_start float64) *OpWire.Response{
 	st := unix_seconds(time.Now())
-	_, err := cli.Get(string(op.Get.Key))
+	target, _, err := cli.Get(string(op.Get.Key))
 	end := unix_seconds(time.Now())
 
 	err_msg := "None"
@@ -68,9 +66,10 @@ func get(res_ch chan *OpWire.Response, cli Client, op *OpWire.Request_Operation_
 		End:          end,
 		Clientid:     clientid,
 		Optype:       "Read",
+		Target:       target,
 	}
 
-	res_ch <- resp
+	return resp
 }
 
 func check(e error) {
@@ -79,13 +78,22 @@ func check(e error) {
 	}
 }
 
-func perform(op OpWire.Request_Operation, res_ch chan *OpWire.Response, cli Client, clientid uint32, start_time float64) {
+func perform(op OpWire.Request_Operation, cli Client, clientid uint32, start_time float64, new_client_per_request bool, client_gen func () (Client, error)) *OpWire.Response{
+	//Create a new client if desired
+	func_cli := &cli
+	if new_client_per_request {
+		cli, err := client_gen()
+		check(err)
+		defer cli.Close()
+		func_cli = &cli
+	}
+
 	expected_start := op.Start + start_time
 	switch op_t := op.OpType.(type) {
 	case *OpWire.Request_Operation_Put:
-		put(res_ch, cli, op_t, clientid, expected_start)
+		return put(*func_cli, op_t, clientid, expected_start)
 	case *OpWire.Request_Operation_Get:
-		get(res_ch, cli, op_t, clientid, expected_start)
+		return get(*func_cli, op_t, clientid, expected_start)
 	default:
 		resp := &OpWire.Response{
 			ResponseTime: -1,
@@ -93,7 +101,7 @@ func perform(op OpWire.Request_Operation, res_ch chan *OpWire.Response, cli Clie
 			Clientid:     clientid,
 			Optype:       "Error",
 		}
-		res_ch <- resp
+		return resp
 	}
 }
 
@@ -112,7 +120,6 @@ func recv(reader *bufio.Reader) *OpWire.Request{
 	if err := proto.Unmarshal([]byte(payload), op); err != nil {
 		log.Fatal("Failed to parse incomming operation")
 	}
-	log.Printf("received op size = %d\n", size)
 	return op
 }
 
@@ -125,7 +132,6 @@ func marshall_response(resp *OpWire.Response) []byte {
 func send(writer *os.File, msg []byte){
 	var size int32
 	size = int32(len(msg))
-	log.Printf("send size = %d", size)
 	size_part := make([]byte, 4)
 	// uint32 doesn't change sign bit, just how value is interpreted
 	binary.LittleEndian.PutUint32(size_part, uint32(size))
@@ -140,26 +146,47 @@ func init() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 }
 
-func result_loop(res_ch chan *OpWire.Response, out *os.File, done chan bool) {
+func result_loop(res_ch chan *OpWire.Response, out *os.File, done chan struct{}) {
 	var results []*OpWire.Response
 	log.Print("Starting result loop")
 	for res := range res_ch {
 		results = append(results, res)
 	}
 
+	log.Print("Got all results, writing to load generator")
 	for _, res := range results {
 		payload := marshall_response(res)
-		log.Print("Sending response")
 		send(out, payload)
 	}
-	done <- true
+	close(done)
 }
 
-func consume_ignore(res_ch chan *OpWire.Response) {
-	for range res_ch {}
+func waitGroupChannel(wg *sync.WaitGroup) (<-chan struct{}) {
+	complete := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(complete)
+	} ()
+	return complete
 }
 
-func Run(client_gen func() (Client, error), clientid uint32, result_pipe string, drop_overloaded bool, new_client_per_request bool, number_threads int, number_clients int) {
+func make_messenger(input <-chan *OpWire.Response, output chan *OpWire.Response) chan struct{}{
+	close_this := make(chan struct{})
+	go func(messenger_close chan struct {}, input <-chan *OpWire.Response, output chan *OpWire.Response) {
+		for {
+			select {
+			case <- close_this:
+				close(output)
+				return
+			case result := <-input:
+				output <- result
+			}
+		}
+	}(close_this, input, output)
+	return close_this
+}
+
+func Run(client_gen func() (Client, error), clientid uint32, result_pipe string, new_client_per_request bool) {
 	log.Print("Client: Starting run")
 	log.Printf("Client: creating file")
 	log.Print(result_pipe)
@@ -178,8 +205,6 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	log.Print("Phase 1: preload")
 	var ops []*OpWire.Request_Operation
 	got_finalise := false
-	bh_ch := make(chan *OpWire.Response)
-	go consume_ignore(bh_ch)
 	for !got_finalise {
 		op := recv(reader)
 		log.Print(op)
@@ -188,7 +213,7 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 		case *OpWire.Request_Op:
 			if op.GetOp().Prereq {
 				log.Print("Performing prereq")
-				perform(*op.GetOp(), bh_ch, cli, clientid, unix_seconds(time.Now()))
+				perform(*op.GetOp(), cli, clientid, unix_seconds(time.Now()), false, client_gen)
 			} else {
 				ops = append(ops, op.GetOp())
 			}
@@ -200,74 +225,16 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 			log.Fatal("Quitting due to unrecognised message")
 		}
 	}
-	close(bh_ch)
 
 	//Phase 2: Readying
 	log.Print("Phase 2: Readying")
 
-	//Create client channels
-	nchannels := number_threads
-	conns := make([]chan OpWire.Request_Operation, nchannels)
-	for i := 0; i < nchannels; i++ {
-		conns[i] = make(chan OpWire.Request_Operation, 10)
-	}
-
 	//Dispatch results loop
+	final_res_ch := make(chan *OpWire.Response)
+	results_complete := make(chan struct{})
+	go result_loop(final_res_ch, out_writer, results_complete)
 	res_ch := make(chan *OpWire.Response, 50000)
-	done := make(chan bool)
-	go result_loop(res_ch, out_writer, done)
-
-	start_time := new(time.Time)
-	wait_bar := make(chan struct{})
-	var wg_perform sync.WaitGroup
-	closeClients := func () {}
-	if !new_client_per_request {
-		log.Print("Using pooled clients")
-		//Create clients
-		nclients := number_clients
-		clients := make([]Client, nclients)
-		for i := 0; i < nclients; i++ {
-			cli, err := client_gen()
-			check(err)
-			clients[i] = cli
-		}
-
-		//Dispatch concurrent clients
-		for i, ch := range conns {
-			wg_perform.Add(1)
-			go func(cli Client, ch chan OpWire.Request_Operation, t *time.Time) {
-				defer wg_perform.Done()
-				<-wait_bar
-				start_time := *t
-				for op := range ch {
-					perform(op, res_ch, cli, clientid, unix_seconds(start_time))
-				}
-			} (clients[i%nclients], ch, start_time)
-		}
-		closeClients = func () {
-			for _, cli := range clients {
-				cli.Close()
-			}
-		}
-	} else {
-		log.Print("One client per request")
-		//Dispatch concurrent clients
-		for _, ch := range conns {
-			wg_perform.Add(1)
-			go func(ch chan OpWire.Request_Operation, t *time.Time) {
-				defer wg_perform.Done()
-				<-wait_bar
-				start_time := *t
-				for op := range ch {
-					cli, err := client_gen()
-					check(err)
-					perform(op, res_ch, cli, clientid, unix_seconds(start_time))
-					cli.Close()
-				}
-			} (ch, start_time)
-		}
-	}
-
+	messenger_complete := make_messenger(res_ch, final_res_ch)
 
 	//signal ready
 	send(out_writer, []byte(""))
@@ -286,36 +253,52 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 		}
 	}
 
+	var wg_perform sync.WaitGroup
+	stopCh := make(chan struct{})
+	op_ch := make(chan *OpWire.Request_Operation)
 	log.Print("Starting to perform ops")
-	*start_time = time.Now()
-	close(wait_bar)
-	for i, op := range ops {
+	start_time := time.Now()
+	for _, op := range ops {
 		end_time := start_time.Add(time.Duration(op.Start * float64(time.Second)))
 		t := time.Now()
-		for ; t.Before(end_time); t = time.Now() {}
-		if drop_overloaded {
-			select {
-			case conns[i % nchannels] <- *op:
-			default:
-				log.Printf("Skipping op, channel is blocked")
-			}
-		} else {
-			conns[i % nchannels] <- *op
+		time.Sleep(end_time.Sub(t))
+
+		select {
+		case op_ch <- op:
+			continue
+		default:
+			wg_perform.Add(1)
+			//If can't start op currently create a new worker to do so
+			go func(op_ch <-chan *OpWire.Request_Operation, wg *sync.WaitGroup) {
+				defer wg.Done()
+				for op := range op_ch {
+					resp := perform(*op, cli, clientid, unix_seconds(start_time), new_client_per_request, client_gen)
+					select {
+					case <- stopCh:
+						continue
+					case res_ch <- resp:
+					}
+				}
+			} (op_ch, &wg_perform)
+			op_ch <- op
 		}
 	}
 	log.Print("Finished sending ops")
+	log.Print("Phase 4: Collate")
+	close(stopCh)
+	close(op_ch)
 
-	for _, ch := range conns {
-		close(ch)
+	select {
+	case <- waitGroupChannel(&wg_perform):
+	case <- time.After(30 * time.Second):
 	}
 
-	//Wait to complete ops
-	wg_perform.Wait()
-
+	log.Print("Closing result pipe")
 	//Signal end of results 
-	close(res_ch)
-	//Wait for results to be returned to generator
-	<-done
+	close(messenger_complete)
 
-	closeClients()
+	log.Print("Waiting for results to be sent")
+	//Wait for results to be returned to generator
+	<-results_complete
+	log.Print("Results sent, exiting good night")
 }
