@@ -50,7 +50,7 @@ func put(cli Client, op *OpWire.Request_Operation_Put, clientid uint32, expected
 
 func get(cli Client, op *OpWire.Request_Operation_Get, clientid uint32, expected_start float64) *OpWire.Response{
 	st := unix_seconds(time.Now())
-	target, _, err := cli.Get(string(op.Get.Key))
+	_, target, err := cli.Get(string(op.Get.Key))
 	end := unix_seconds(time.Now())
 
 	err_msg := "None"
