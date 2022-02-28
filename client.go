@@ -8,10 +8,8 @@ import (
 	"bufio"
 	"io"
 	"encoding/binary"
+	"encoding/json"
 	"sync"
-
-	"github.com/Cjen1/rc_go/OpWire"
-	"github.com/golang/protobuf/proto"
 )
 
 func unix_seconds(t time.Time) float64 {
@@ -24,50 +22,108 @@ type Client interface {
 	Close ()
 }
 
-func put(cli Client, op *OpWire.Request_Operation_Put, clientid uint32, expected_start float64) *OpWire.Response{
+type jsonmap = map[string]interface{}
+
+type Operation struct {
+	Kind string `json:"kind"`
+	Payload map[string]string `json:"payload"`
+	Time float64 `json:"time"`
+}
+
+func decode_operation(m jsonmap) Operation {
+	var res Operation
+	for key, value := range m {
+		switch key {
+		case "kind":
+			res.Kind = value.(string)
+		case "payload":
+			res.Payload = value.(map[string]string)
+		case "time":
+			res.Time = value.(float64)
+		default:
+			log.Fatal("Cannot parse: %v", m)
+			panic("Failed to parse packet")
+		}
+
+	}
+	return res
+}
+
+type Preload struct {
+	Prereq bool `json:"prereq"`
+	Operation Operation `json:"operation"`
+}
+
+func decode_preload(m jsonmap) Preload {
+	var res Preload
+	for key, value := range m {
+		switch key {
+		case "prereq":
+			res.Prereq = value.(bool)
+		case "operation":
+			res.Operation = decode_operation(value.(jsonmap))
+		default:
+			log.Fatal("Cannot parse: %v", m)
+			panic("Failed to parse packet")
+		}
+	}
+	return res
+}
+
+type Message struct {
+	Kind string `json:"kind"`
+	Payload jsonmap `json:"payload"`
+}
+
+func response(
+	t_submitted float64,
+	t_result float64,
+	result string,
+	kind string,
+	clientid string,
+	other jsonmap) jsonmap {
+	return map[string]interface{}{
+		"t_submitted": t_submitted,
+		"t_result": t_result,
+		"result": result,
+		"kind": kind,
+		"clientid": clientid,
+		"other": other,
+	}
+}
+
+func put(cli Client, key string, value string, clientid string, expected_start float64) jsonmap{
 	st := unix_seconds(time.Now())
-	target, err := cli.Put(string(op.Put.Key), string(op.Put.Value))
+	target, err := cli.Put(key, value)
 	end := unix_seconds(time.Now())
 
-	err_msg := "None"
+	err_msg := "Success"
 	if err != nil {
-		err_msg = "ERROR WAS FOUND: " + err.Error()
+		err_msg = err.Error()
 	}
 
-	resp := &OpWire.Response{
-		ResponseTime: end - expected_start,
-		Err:          err_msg,
-		ClientStart:  st,
-		QueueStart:   expected_start,
-		End:          end,
-		Clientid:     clientid,
-		Optype:       "Write",
-		Target:       target,
-	}
+	resp := response(st, end, err_msg, "write", clientid, map[string]interface{}{
+		"target": target,
+		"expected_start": expected_start,
+	})
 
 	return resp
 }
 
-func get(cli Client, op *OpWire.Request_Operation_Get, clientid uint32, expected_start float64) *OpWire.Response{
+func get(cli Client, key string, clientid string, expected_start float64) jsonmap{
 	st := unix_seconds(time.Now())
-	_, target, err := cli.Get(string(op.Get.Key))
+	_, target, err := cli.Get(key)
 	end := unix_seconds(time.Now())
 
-	err_msg := "None"
+	err_msg := "Success"
 	if err != nil {
-		err_msg = "ERROR WAS FOUND: " + err.Error()
+		err_msg = err.Error()
 	}
 
-	resp := &OpWire.Response{
-		ResponseTime: end - expected_start,
-		Err:          err_msg,
-		ClientStart:  st,
-		QueueStart:   expected_start,
-		End:          end,
-		Clientid:     clientid,
-		Optype:       "Read",
-		Target:       target,
-	}
+	resp := response(st, end, err_msg, "read", clientid, map[string]interface{}{
+		"target": target,
+		"expected_start": expected_start,
+	})
 
 	return resp
 }
@@ -78,7 +134,7 @@ func check(e error) {
 	}
 }
 
-func perform(op OpWire.Request_Operation, cli Client, clientid uint32, start_time float64, new_client_per_request bool, client_gen func () (Client, error)) *OpWire.Response{
+func perform(op Operation, cli Client, clientid string, test_start_time float64, new_client_per_request bool, client_gen func () (Client, error)) jsonmap {
 	//Create a new client if desired
 	func_cli := &cli
 	if new_client_per_request {
@@ -88,24 +144,24 @@ func perform(op OpWire.Request_Operation, cli Client, clientid uint32, start_tim
 		func_cli = &cli
 	}
 
-	expected_start := op.Start + start_time
-	switch op_t := op.OpType.(type) {
-	case *OpWire.Request_Operation_Put:
-		return put(*func_cli, op_t, clientid, expected_start)
-	case *OpWire.Request_Operation_Get:
-		return get(*func_cli, op_t, clientid, expected_start)
+	expected_start := op.Time + test_start_time
+	switch op.Kind {
+	case "write":
+		return put(*func_cli, op.Payload["key"], op.Payload["value"], clientid, expected_start)
+	case "read":
+		return get(*func_cli, op.Payload["key"], clientid, expected_start)
 	default:
-		resp := &OpWire.Response{
-			ResponseTime: -1,
-			Err:          fmt.Sprintf("Error: Operation (%v) was not found / supported", op),
-			Clientid:     clientid,
-			Optype:       "Error",
-		}
-		return resp
+		return response(
+			-1.0,
+			-1.0,
+			fmt.Sprintf("Error operation (%v) was not found or supported", op),
+			op.Kind,
+			clientid,
+			nil)
 	}
 }
 
-func recv(reader *bufio.Reader) *OpWire.Request{
+func recv(reader *bufio.Reader) Message {
 	var size int32
 	if err := binary.Read(reader, binary.LittleEndian, &size); err != nil {
 		log.Fatal(err)
@@ -116,28 +172,24 @@ func recv(reader *bufio.Reader) *OpWire.Request{
 		log.Fatal(err)
 	}
 
-	op := &OpWire.Request{}
-	if err := proto.Unmarshal([]byte(payload), op); err != nil {
-		log.Fatal("Failed to parse incomming operation")
-	}
-	return op
+	var msg Message
+	json.Unmarshal(payload, &msg)
+
+	return msg
+
 }
 
-func marshall_response(resp *OpWire.Response) []byte {
-	payload, err := proto.Marshal(resp)
+func send(msg Message) {
+	payload, err := json.Marshal(msg)
 	check(err)
-	return payload
-}
 
-func send(writer *os.File, msg []byte){
 	var size int32
-	size = int32(len(msg))
+	size = int32(len(payload))
 	size_part := make([]byte, 4)
-	// uint32 doesn't change sign bit, just how value is interpreted
 	binary.LittleEndian.PutUint32(size_part, uint32(size))
 
-	payload := append(size_part[:], msg[:]...)
-	_, err := writer.Write(payload)
+	output := append(size_part[:], payload[:]...)
+	_, err = os.Stdout.Write(output)
 	check(err)
 }
 
@@ -146,8 +198,8 @@ func init() {
 	log.SetFlags(log.Ltime | log.Lmicroseconds)
 }
 
-func result_loop(res_ch chan *OpWire.Response, out *os.File, done chan struct{}) {
-	var results []*OpWire.Response
+func result_loop(res_ch chan jsonmap, done chan struct{}) {
+	var results []jsonmap
 	log.Print("Starting result loop")
 	for res := range res_ch {
 		results = append(results, res)
@@ -155,8 +207,11 @@ func result_loop(res_ch chan *OpWire.Response, out *os.File, done chan struct{})
 
 	log.Print("Got all results, writing to load generator")
 	for _, res := range results {
-		payload := marshall_response(res)
-		send(out, payload)
+		msg := Message{
+			Kind : "result",
+			Payload : res,
+		}
+		send(msg)
 	}
 	close(done)
 }
@@ -170,9 +225,10 @@ func waitGroupChannel(wg *sync.WaitGroup) (<-chan struct{}) {
 	return complete
 }
 
-func make_messenger(input <-chan *OpWire.Response, output chan *OpWire.Response) chan struct{}{
+// Buffering channel, to force delayed clients to quit
+func make_messenger(input <-chan jsonmap, output chan jsonmap) chan struct{}{
 	close_this := make(chan struct{})
-	go func(messenger_close chan struct {}, input <-chan *OpWire.Response, output chan *OpWire.Response) {
+	go func(messenger_close chan struct {}, input <-chan jsonmap, output chan jsonmap) {
 		for {
 			select {
 			case <- close_this:
@@ -186,14 +242,8 @@ func make_messenger(input <-chan *OpWire.Response, output chan *OpWire.Response)
 	return close_this
 }
 
-func Run(client_gen func() (Client, error), clientid uint32, result_pipe string, new_client_per_request bool) {
+func Run(client_gen func() (Client, error), clientid string, new_client_per_request bool) {
 	log.Print("Client: Starting run")
-	log.Printf("Client: creating file")
-	log.Print(result_pipe)
-	file, err := os.OpenFile(result_pipe, os.O_WRONLY, 0755)
-	check(err)
-	defer file.Close()
-	out_writer := file
 
 	cli, err := client_gen()
 	defer cli.Close()
@@ -203,21 +253,21 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 
 	//Phase 1: preload
 	log.Print("Phase 1: preload")
-	var ops []*OpWire.Request_Operation
+	var ops []Operation
 	got_finalise := false
 	for !got_finalise {
 		op := recv(reader)
-		log.Print(op)
 
-		switch op.Kind.(type) {
-		case *OpWire.Request_Op:
-			if op.GetOp().Prereq {
+		switch op.Kind {
+		case "preload":
+			preload := decode_preload(op.Payload)
+			if preload.Prereq {
 				log.Print("Performing prereq")
-				perform(*op.GetOp(), cli, clientid, unix_seconds(time.Now()), false, client_gen)
+				perform(preload.Operation, cli, clientid, unix_seconds(time.Now()), false, client_gen)
 			} else {
-				ops = append(ops, op.GetOp())
+				ops = append(ops, preload.Operation)
 			}
-		case *OpWire.Request_Finalise_:
+		case "finalise":
 			got_finalise = true
 		default:
 			log.Print("Got unrecognised message...")
@@ -230,22 +280,22 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	log.Print("Phase 2: Readying")
 
 	//Dispatch results loop
-	final_res_ch := make(chan *OpWire.Response)
+	final_res_ch := make(chan jsonmap)
 	results_complete := make(chan struct{})
-	go result_loop(final_res_ch, out_writer, results_complete)
-	res_ch := make(chan *OpWire.Response, 50000)
+	go result_loop(final_res_ch, results_complete)
+	res_ch := make(chan jsonmap, 50000)
 	messenger_complete := make_messenger(res_ch, final_res_ch)
 
 	//signal ready
-	send(out_writer, []byte(""))
+	send(Message{Kind:"ready", Payload : nil})
 
 	//Phase 3: Execute
 	log.Print("Phase 3: Execute")
 	got_start := false
 	for !got_start{
 		op := recv(reader)
-		switch op.Kind.(type) {
-		case *OpWire.Request_Start_:
+		switch op.Kind{
+		case "start":
 			log.Print("Got start_request")
 			got_start = true
 		default:
@@ -255,11 +305,11 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 
 	var wg_perform sync.WaitGroup
 	stopCh := make(chan struct{})
-	op_ch := make(chan *OpWire.Request_Operation)
+	op_ch := make(chan Operation)
 	log.Print("Starting to perform ops")
 	start_time := time.Now()
 	for _, op := range ops {
-		end_time := start_time.Add(time.Duration(op.Start * float64(time.Second)))
+		end_time := start_time.Add(time.Duration(op.Time * float64(time.Second)))
 		t := time.Now()
 		time.Sleep(end_time.Sub(t))
 
@@ -269,10 +319,10 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 		default:
 			wg_perform.Add(1)
 			//If can't start op currently create a new worker to do so
-			go func(op_ch <-chan *OpWire.Request_Operation, wg *sync.WaitGroup) {
+			go func(op_ch <-chan Operation, wg *sync.WaitGroup) {
 				defer wg.Done()
 				for op := range op_ch {
-					resp := perform(*op, cli, clientid, unix_seconds(start_time), new_client_per_request, client_gen)
+					resp := perform(op, cli, clientid, unix_seconds(start_time), new_client_per_request, client_gen)
 					select {
 					case <- stopCh:
 						continue
@@ -294,11 +344,11 @@ func Run(client_gen func() (Client, error), clientid uint32, result_pipe string,
 	}
 
 	log.Print("Closing result pipe")
-	//Signal end of results 
+	//Signal end of results and force any remaining clients to not write to it
 	close(messenger_complete)
 
 	log.Print("Waiting for results to be sent")
 	//Wait for results to be returned to generator
 	<-results_complete
-	log.Print("Results sent, exiting good night")
+	log.Print("Results sent, exiting")
 }
